@@ -1,37 +1,47 @@
-# batt_opt.sh
-# Version 1.0
-# 2021-05-16 @ 15:29 (UTC)
-# ID: 1b14d2
-# Written by jpzex@XDA
+# base_opt.sh
+# Version 1.1
+# 2022-12-02 @ 22:33 (UTC)
+# ID: RELEASE
+# Written by @jpzex (XDA & Telegram)
 # Use at your own risk, Busybox is required.
 
-which busybox > /dev/null || $(echo "No busybox found." && exit 0)
+##### USER SET VARIABLES #####
 
-alias_list="
-mountpoint
-awk
-echo
-grep
-chmod
-fstrim
-cat
-mount"
+# Dump mode (0 or 1): log before and after for every value that is getting applied.
+dump=0
 
-for x in $alias_list; do
-alias $x="busybox $x"; done
+# Dry run mode (0 or 1): do not change any value, just dump before and after if dump=1.
+dryrun=0
 
-scriptname=batt_opt
-dumpE=0
+##### DO NOT EDIT BELOW THIS LINE #####
 
 # Specific optimizations for economy,
 # focused on extended battery time.
 
-specific_opt(){
+main_opt(){
 M2 # sysctl
 M3 # LMK
 M5 # kernel modules
-M6 # interactive governor
+M6 # interactive governor BROKEN???
 M7 # adreno gpu
+}
+
+prep(){
+
+np=/dev/null
+
+which busybox > $np
+
+[ $? != 0 ] && echo "No busybox found, please install it first. If you just installed, a reboot may be necessary." && exit 1
+
+alias_list="mountpoint awk echo grep chmod fstrim cat mount uniq"
+
+for x in $alias_list; do
+    alias $x="busybox $x";
+done
+
+scriptname=batt_opt
+
 }
 
 #===================================================#
@@ -45,19 +55,20 @@ M2(){
 sys=/proc/sys
 
 kernel_batt(){
-wr $sys/kernel/random/read_wakeup_threshold 256
-wr $sys/kernel/random/write_wakeup_threshold 256
+wr $sys/kernel/random/read_wakeup_threshold 1024
+wr $sys/kernel/random/write_wakeup_threshold 1024
 }
 
 vm_batt(){
-wr $sys/vm/dirty_ratio 90
-wr $sys/vm/dirty_background_ratio 50
-wr $sys/vm/dirty_expire_centisecs 3000
-wr $sys/vm/dirty_writeback_centisecs 1000
-wr $sys/vm/min_free_order_shift 5
-wr $sys/vm/swappiness 40
-wr $sys/vm/user_reserve_kbytes 256
-wr $sys/vm/vfs_cache_pressure 300
+wr $sys/vm/dirty_ratio 50
+wr $sys/vm/dirty_background_ratio 45
+wr $sys/vm/dirty_expire_centisecs 6000
+wr $sys/vm/dirty_writeback_centisecs 3000
+wr $sys/vm/min_free_order_shift 1
+wr $sys/vm/page-cluster 2
+wr $sys/vm/swappiness 10
+wr $sys/vm/user_reserve_kbytes 32
+wr $sys/vm/vfs_cache_pressure 75
 }
 
 kernel_batt
@@ -86,13 +97,10 @@ lmk(){
 echo "$(t $1),$(t $2),$(t $3),$(t $4),$(t $5),$(t $6)"
 }
 
-limits=$(lmk 10 19 30 38 54 98)
-
-#wr $params/adj 
-wrl $params/minfree $limits
+wrl $params/minfree $(lmk 10 19 30 38 54 98)
 wrl $params/cost 32
 
-unset params extramb tend t lmk limits
+unset params extramb tend t lmk 
 
 }
 
@@ -100,13 +108,14 @@ unset params extramb tend t lmk limits
 #===================================================#
 #===================================================#
 
+
 # Module 5: Kernel modules toggles
 
 M5(){
 
 a="/sys/module/workqueue/parameters"
 
-wrl $a/power_efficient N
+wrl $a/power_efficient Y
 wrl $a/disable_numa Y
 
 a="/sys/module/msm_thermal"
@@ -131,7 +140,7 @@ wrl $a/io_enter_cycles 100
 wrl $a/io_exit_cycles 100
 wrl $a/ip_evt_trig_thr 1
 
-unset a list cpulist count cpu
+unset a list cpulist count cpu x
 
 }
 
@@ -144,6 +153,9 @@ unset a list cpulist count cpu
 M6(){
 
 cpu="/sys/devices/system/cpu"
+
+# Get highest CPU core number
+kernel_max=$(cat /sys/devices/system/cpu/kernel_max)
 
 for x in $cpu/cpu*; do [ -e $x/cpufreq ] && first_cpu=$x && break; done
 
@@ -202,7 +214,7 @@ numfreq=$count
 for x in $rev_list; do
 ef=$preef
 preef=$x
-[ $count == $(($numfreq-3)) ] && break; done
+[ $count == $((numfreq-3)) ] && break; done
 
 for x in "$cpu/cpu$1/cpufreq/interactive" "$cpu/cpufreq/interactive"; do [ -e $x ] && gov=$x; done
 
@@ -246,63 +258,91 @@ wrl $sys/max_pwrlevel 0
 fi; fi
 unset sys min
 
-
 }
 
 #===================================================#
 #===================================================#
 #===================================================#
 
-# Create needed functions:
+vars(){
+
+# Get RAM size in KB 
+msize=$(cat /proc/meminfo | grep "MemTotal" | awk '{ print $2 }')
 
 read(){ [ -e $1 ] && cat $1; }
 
-search(){ read $2 | grep $1 >> /dev/null; }
+search(){ read $2 | grep $1 > $np ; }
 
 # search <string> <file>
 # searches for string in file if it exists and returns
 # just an error code, 0 (true) for "string found" or 
 # 1 (false) for "not found". Does not print.
 
-wr(){
-[ -e $1 ] && $(echo -e $2 > $1 || echo "$1 write error."); }
+#=DUMP=AND=DRY=RUN=START============================#
 
-wrl(){
-[ -e $1 ] && chmod 666 $1 && echo $2 > $1 && chmod 444 $1; }
-
-if [ $dumpE == 1 ]; then # initialize dump
-
-dpath=/data/$scriptname
-
-for x in $dpath*; do
-[ -e $x ] && rm $x; done
-
-dump="$dpath-$(date +%Y-%m-%d).txt"
+if [ $dryrun == 0 ]; then
+have="have"
 
 wr(){
-if [ -e $1 ]; then
-echo -e "WR - A: $1 = $(cat $1)\nWR - B: $1 = $2\n" >> $dump; fi; }
+[ -e $1 ] && $(echo -e $2 > $1 ||\
+echo "$1 write error.")
+}
 
 wrl(){
-if [ -e $1 ]; then
-echo -e "WRL - A: $1 = $(cat $1)\nWRL - B: $1 = $2\n" >> $dump;
-chmod 666 "$1"; fi; }
+[ -e $1 ] && chmod 666 $1 &&\
+echo $2 > $1 && chmod 444 $1
+}
+
+else
+have="have not"
+wr(){
+[ -e $1 ] && echo -e "$2 > $1" 
+}
+
+wrl(){
+wr $1 $2
+}
+
+fi
+
+if [ $dump == 1 ]; then
+    dpath=/data/$scriptname
+    for x in $dpath*; do
+        [ -e $x ] && rm $x
+    done
+    dpath="$dpath-$(date +%Y-%m-%d).txt"
+    echo "The dump file is located in: $dpath. The values $have been applied, according to the config on the start of the script."
+
+    wr(){
+    if [ $dump == 1 ]; then
+        if [ -e $1 ]; then
+            echo -e "WR - A: $1 = $(cat $1)\nWR - B: $1 = $2\n" >> $dpath
+            [ $dryrun == 0 ] && $(echo -e $2 > $1 || echo "$1 write error.");
+        fi
+     fi
+}
+
+    wrl(){
+    if [ $dump == 1 ]; then
+        if [ -e $1 ]; then
+            echo -e "WRL - A: $1 = $(cat $1)\nWRL - B: $1 = $2\n" >> $dpath
+             [ $dryrun == 0 ] && chmod 666 $1 && echo $2 > $1 && chmod 444 $1
+        fi
+    fi
+}
 
 fi # end dump
 
+#=DUMP=AND=DRY=RUN=END==============================#
+
+} # end vars
+
 marker="/data/$scriptname-last-run"
 
-if [ $dumpE == 0 ]; then touch $marker; echo $(date) > $marker; fi
+if [ $dryrun == 0 ]; then touch $marker; echo $(date) > $marker; fi
 unset marker
 
-# Get highest CPU core number
-kernel_max=$(cat /sys/devices/system/cpu/kernel_max)
+prep && vars && main_opt
+#if [ -z $dumpinfo ]; then echo $dumpinfo; fi
 
-# Get RAM size in KB 
-msize=$(cat /proc/meminfo | grep "MemTotal" | awk '{ print $2 }')
-
-specific_opt
-
-unset specific_opt dumpE msize kernel_max apply dump dpath marker
-
-exit 0
+unset main_opt scriptname alias_list msize apply dump dryrun dpath wr wrl read search dumpinfo have np
